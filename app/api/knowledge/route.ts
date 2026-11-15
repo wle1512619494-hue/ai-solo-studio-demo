@@ -1,0 +1,9 @@
+import { NextRequest,NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
+import pdfParse from "pdf-parse";
+import { addDocument,listDocuments,removeDocument,splitText,type KnowledgeChunk } from "@/lib/knowledge";
+export const runtime="nodejs";
+const MAX_BYTES=12*1024*1024;
+export async function GET(){return NextResponse.json({documents:await listDocuments()});}
+export async function POST(req:NextRequest){try{const data=await req.formData();const file=data.get("file");if(!(file instanceof File))return NextResponse.json({error:"请选择文件"},{status:400});if(file.size>MAX_BYTES)return NextResponse.json({error:"文件不能超过 12MB"},{status:413});const ext=file.name.split(".").pop()?.toLowerCase();if(!["pdf","txt","md","markdown"].includes(ext||""))return NextResponse.json({error:"仅支持 PDF、TXT、Markdown"},{status:415});const buffer=Buffer.from(await file.arrayBuffer());let text="";if(ext==="pdf"){const parsed=await pdfParse(buffer);text=parsed.text;}else{text=buffer.toString("utf8");}if(!text.trim())return NextResponse.json({error:"没有提取到文字。扫描版 PDF 暂不支持 OCR。"},{status:422});const id=randomUUID();const chunks:KnowledgeChunk[]=splitText(text).map((content,index)=>({id:randomUUID(),documentId:id,documentName:file.name,content,page:null}));const doc={id,name:file.name,type:ext||"unknown",size:file.size,createdAt:new Date().toISOString(),chunks};await addDocument(doc);return NextResponse.json({document:{id,name:file.name,type:ext,chunkCount:chunks.length}});}catch(error){console.error(error);return NextResponse.json({error:"文档解析失败"},{status:500});}}
+export async function DELETE(req:NextRequest){const id=req.nextUrl.searchParams.get("id");if(!id)return NextResponse.json({error:"缺少文档 ID"},{status:400});await removeDocument(id);return NextResponse.json({success:true});}
