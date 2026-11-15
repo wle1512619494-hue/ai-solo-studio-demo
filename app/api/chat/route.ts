@@ -1,0 +1,5 @@
+import { NextRequest,NextResponse } from "next/server";
+import { searchKnowledge } from "@/lib/knowledge";
+export const runtime="nodejs";
+const SAFETY=/(漏电|带电|拆机|高压|电气|短路|触电|安全阀|压力容器|打开机壳)/i;
+export async function POST(req:NextRequest){try{const {message}=await req.json();if(typeof message!=="string"||!message.trim())return NextResponse.json({error:"请输入问题"},{status:400});if(SAFETY.test(message))return NextResponse.json({answer:"这个问题可能涉及电气或压力安全风险。请停止自行拆机或进行带电操作，联系具备资质的售后工程师。当前系统不会提供此类操作指导。我可以帮您登记工单。",warning:true,sources:[],handoff:true});const hits=await searchKnowledge(message);if(!hits.length)return NextResponse.json({answer:"我没有在当前企业知识库中找到足够依据回答这个问题。为避免提供不准确的维修建议，请补充设备型号或转由人工售后工程师确认。",warning:true,sources:[],handoff:true});const answer="根据当前知识库检索到的资料，以下内容与您的问题相关：\n\n"+hits.map(x=>x.content).join("\n\n")+"\n\n以上内容仅为资料检索结果，不构成故障诊断。若涉及设备异常、停机或安全风险，请联系售后工程师确认。";return NextResponse.json({answer,warning:false,handoff:false,sources:hits.map(x=>({documentName:x.documentName,page:x.page,excerpt:x.content.slice(0,180)}))});}catch{return NextResponse.json({error:"请求处理失败"},{status:500});}}
