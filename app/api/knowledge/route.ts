@@ -1,6 +1,6 @@
 import { NextRequest,NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import pdfParse from "pdf-parse";
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import { addDocument,listDocuments,removeDocument,splitText,type KnowledgeChunk } from "@/lib/knowledge";
 export const runtime="nodejs";
 const MAX_BYTES=12*1024*1024;
