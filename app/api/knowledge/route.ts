@@ -1,10 +1,45 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { addDocument, listDocuments, removeDocument, splitText, type KnowledgeChunk } from "@/lib/knowledge";
 
 export const runtime = "nodejs";
 const MAX_BYTES = 12 * 1024 * 1024;
+
+// PDF.js needs its bundled CMaps and standard font data for some CID-font PDFs,
+// especially documents generated with Chinese Type-0/CID fonts.
+const pdfjsAssets = path.join(process.cwd(), "node_modules", "pdfjs-dist");
+
+async function extractPdfText(buffer: Buffer): Promise<{ text: string; pageCount: number; extractedChars: number }> {
+  const task = getDocument({
+    data: new Uint8Array(buffer),
+    useSystemFonts: true,
+    isEvalSupported: false,
+    cMapUrl: path.join(pdfjsAssets, "cmaps") + path.sep,
+    cMapPacked: true,
+    standardFontDataUrl: path.join(pdfjsAssets, "standard_fonts") + path.sep,
+    disableFontFace: true,
+  });
+  const pdf = await task.promise;
+  const pages: string[] = [];
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent({ includeMarkedContent: false });
+      const pageText = content.items
+        .map((item) => ("str" in item ? item.str : ""))
+        .filter((value) => value.length > 0)
+        .join(" ");
+      pages.push(pageText);
+      page.cleanup();
+    }
+    const text = pages.join("\n").trim();
+    return { text, pageCount: pdf.numPages, extractedChars: text.length };
+  } finally {
+    await pdf.destroy();
+  }
+}
 
 export async function GET() {
   try {
@@ -12,31 +47,6 @@ export async function GET() {
   } catch (error) {
     console.error("Knowledge list failed:", error);
     return NextResponse.json({ error: "读取知识库失败" }, { status: 500 });
-  }
-}
-
-async function extractPdfText(buffer: Buffer): Promise<string> {
-  const task = getDocument({
-    data: new Uint8Array(buffer),
-    useSystemFonts: true,
-    isEvalSupported: false,
-  });
-  const pdf = await task.promise;
-  const pages: string[] = [];
-  try {
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
-      const page = await pdf.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const pageText = content.items
-        .map((item) => ("str" in item ? item.str : ""))
-        .filter(Boolean)
-        .join(" ");
-      pages.push(pageText);
-      page.cleanup();
-    }
-    return pages.join("\n");
-  } finally {
-    await pdf.destroy();
   }
 }
 
@@ -57,12 +67,28 @@ export async function POST(req: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const text = ext === "pdf" ? await extractPdfText(buffer) : buffer.toString("utf8");
-    if (!text.trim()) {
-      return NextResponse.json(
-        { error: "没有提取到文字。该 PDF 可能是扫描件或图片型 PDF，目前暂不支持 OCR。" },
-        { status: 422 },
-      );
+    let text: string;
+    let pdfDiagnostics: { pageCount: number; extractedChars: number } | undefined;
+
+    if (ext === "pdf") {
+      const result = await extractPdfText(buffer);
+      text = result.text;
+      pdfDiagnostics = { pageCount: result.pageCount, extractedChars: result.extractedChars };
+      console.info("PDF extraction diagnostics:", { file: file.name, ...pdfDiagnostics });
+      if (!text) {
+        return NextResponse.json(
+          {
+            error: "PDF 已读取，但没有提取到文字。请确认它不是扫描件/图片型 PDF；如为文字型 PDF，请提供文件样本以继续排查。",
+            diagnostics: pdfDiagnostics,
+          },
+          { status: 422 },
+        );
+      }
+    } else {
+      text = buffer.toString("utf8");
+      if (!text.trim()) {
+        return NextResponse.json({ error: "文件内容为空" }, { status: 422 });
+      }
     }
 
     const id = randomUUID();
@@ -73,17 +99,21 @@ export async function POST(req: NextRequest) {
       content,
       page: null,
     }));
-    const doc = {
+    if (chunks.length === 0) {
+      return NextResponse.json({ error: "文档没有生成可检索的文本片段" }, { status: 422 });
+    }
+
+    await addDocument({
       id,
       name: file.name,
       type: ext || "unknown",
       size: file.size,
       createdAt: new Date().toISOString(),
       chunks,
-    };
-    await addDocument(doc);
+    });
     return NextResponse.json({
       document: { id, name: file.name, type: ext, chunkCount: chunks.length },
+      ...(pdfDiagnostics ? { diagnostics: pdfDiagnostics } : {}),
     });
   } catch (error) {
     console.error("Knowledge upload failed:", error);
